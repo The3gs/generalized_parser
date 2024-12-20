@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::bail;
+use anyhow::{bail, Context};
 
 #[derive(Debug)]
 struct Group {
@@ -118,7 +118,11 @@ impl<'a> MutRefSliceHelper<'a> for &'a [Group] {
     }
 }
 
-fn pratt_parser(input: &mut &[Group], levels: &HashMap<String, Fixity>, power: u32) -> Application {
+fn pratt_parser(
+    input: &mut &[Group],
+    levels: &HashMap<String, Fixity>,
+    power: u32,
+) -> anyhow::Result<Application> {
     println!(
         "Processing group {:?}",
         input
@@ -127,7 +131,7 @@ fn pratt_parser(input: &mut &[Group], levels: &HashMap<String, Fixity>, power: u
             .collect::<Vec<_>>()
     );
     let Some(group) = input.next() else {
-        panic!("Parser should never be called on empty group list.")
+        bail!("Parser should never be called on empty group list.")
     };
 
     let mut lhs = match levels.get(&group.head_part) {
@@ -142,7 +146,18 @@ fn pratt_parser(input: &mut &[Group], levels: &HashMap<String, Fixity>, power: u
                     assert_eq!(group_ref.len(), 0);
                     argument
                 })
-                .collect(),
+                .collect::<Result<_, _>>()
+                .with_context(|| {
+                    format!(
+                        "While parsing '{}'",
+                        group.show_name(
+                            levels
+                                .get(&group.head_part)
+                                .copied()
+                                .unwrap_or(Fixity::Nonfix)
+                        )
+                    )
+                })?,
         ),
         Some(Fixity::Prefix(next_level)) => {
             let mut arguments: Vec<Application> = group
@@ -155,15 +170,36 @@ fn pratt_parser(input: &mut &[Group], levels: &HashMap<String, Fixity>, power: u
                     assert_eq!(group_ref.len(), 0);
                     argument
                 })
-                .collect();
-            arguments.push(pratt_parser(input, levels, *next_level));
+                .collect::<Result<_, _>>()
+                .with_context(|| {
+                    format!(
+                        "While parsing '{}'",
+                        group.show_name(
+                            levels
+                                .get(&group.head_part)
+                                .copied()
+                                .unwrap_or(Fixity::Nonfix)
+                        )
+                    )
+                })?;
+            arguments.push(pratt_parser(input, levels, *next_level).with_context(|| {
+                format!(
+                    "While parsing '{}'",
+                    group.show_name(
+                        levels
+                            .get(&group.head_part)
+                            .copied()
+                            .unwrap_or(Fixity::Nonfix)
+                    )
+                )
+            })?);
             Application(group.show_name(Fixity::Prefix(*next_level)), arguments)
         }
-        Some(_) => panic!(
+        Some(_) => bail!(
             "Expected prefix or infix operator. Found {}",
             group.head_part
         ),
-        None => panic!("Unknown start of group {}", group.head_part),
+        None => bail!("Unknown start of group {}", group.head_part),
     };
 
     while let Some(group) = input.peek() {
@@ -191,12 +227,24 @@ fn pratt_parser(input: &mut &[Group], levels: &HashMap<String, Fixity>, power: u
                 input.next();
 
                 let mut arguments = vec![lhs];
-                arguments.extend(group.inner_groups.iter().map(|group| {
+                for v in group.inner_groups.iter().map(|group| {
                     let mut group_ref = group.as_slice();
                     let argument = pratt_parser(&mut group_ref, levels, 0);
                     assert_eq!(group_ref.len(), 0);
                     argument
-                }));
+                }) {
+                    arguments.push(v.with_context(|| {
+                        format!(
+                            "While parsing '{}'",
+                            group.show_name(
+                                levels
+                                    .get(&group.head_part)
+                                    .copied()
+                                    .unwrap_or(Fixity::Nonfix)
+                            )
+                        )
+                    })?);
+                }
 
                 lhs = Application(group.show_name(Fixity::Postfix(*binding_power)), arguments);
             }
@@ -208,23 +256,45 @@ fn pratt_parser(input: &mut &[Group], levels: &HashMap<String, Fixity>, power: u
                 input.next();
 
                 let mut arguments = vec![lhs];
-                arguments.extend(group.inner_groups.iter().map(|group| {
+                for v in group.inner_groups.iter().map(|group| {
                     let mut group_ref = group.as_slice();
                     let argument = pratt_parser(&mut group_ref, levels, 0);
                     assert_eq!(group_ref.len(), 0);
                     argument
-                }));
+                }) {
+                    arguments.push(v.with_context(|| {
+                        format!(
+                            "While parsing '{}'",
+                            group.show_name(
+                                levels
+                                    .get(&group.head_part)
+                                    .copied()
+                                    .unwrap_or(Fixity::Nonfix)
+                            )
+                        )
+                    })?)
+                }
 
-                arguments.push(pratt_parser(input, levels, *rhs_bp));
+                arguments.push(pratt_parser(input, levels, *rhs_bp).with_context(|| {
+                    format!(
+                        "While parsing '{}'",
+                        group.show_name(
+                            levels
+                                .get(&group.head_part)
+                                .copied()
+                                .unwrap_or(Fixity::Nonfix)
+                        )
+                    )
+                })?);
 
                 lhs = Application(group.show_name(Fixity::Infix(*lhs_bp, *rhs_bp)), arguments);
             }
             Some(_) => break,
-            None => panic!("Precedence for {} not found.", group.head_part),
+            None => bail!("Precedence for {} not found.", group.head_part),
         }
     }
 
-    lhs
+    Ok(lhs)
 }
 
 fn main() {
@@ -257,5 +327,8 @@ fn main() {
     )
     .unwrap();
 
-    println!("{}", pratt_parser(&mut groups.as_slice(), &levels, 0));
+    println!(
+        "{}",
+        pratt_parser(&mut groups.as_slice(), &levels, 0).unwrap()
+    );
 }
